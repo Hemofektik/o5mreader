@@ -32,13 +32,23 @@
 #define O5MREADER_ERR_CODE_CAN_NOT_ITERATE_NDS_HERE 5
 #define O5MREADER_ERR_CODE_CAN_NOT_ITERATE_REFS_HERE 6
 
-typedef int O5mreaderRet;
+typedef uint64_t O5mreaderRet;
 typedef int O5mreaderIterateRet;
+
+
+typedef struct
+{
+	FILE *f;
+	uint64_t fOffset;
+	char* buffer;
+	int64_t bufferOffset;
+	uint64_t bufferLength;
+} O5mreaderBufferedFile;
 
 typedef struct {
 	int errCode;
 	char* errMsg;
-	FILE *f;
+	O5mreaderBufferedFile* f;
 	uint64_t offset;
 	uint64_t offsetNd;
 	uint64_t offsetRf;
