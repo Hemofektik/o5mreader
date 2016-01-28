@@ -53,7 +53,6 @@ typedef struct {
 	uint64_t offsetNd;
 	uint64_t offsetRf;
 	uint64_t current;
-	char* tagPair;
 	int64_t nodeId;
 	int64_t wayId;
 	int64_t wayNodeId;	

@@ -1,0 +1,9 @@
+[submodule "check"]
+	path = check
+	url = https://github.com/libcheck/check.git
+[submodule "leveldb"]
+	path = leveldb
+	url = https://github.com/zeux/leveldb.git
+[submodule "snappy"]
+	path = snappy
+	url = https://github.com/ukoethe/snappy.git

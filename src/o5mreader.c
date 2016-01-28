@@ -299,7 +299,8 @@ O5mreaderIterateRet o5mreader_readVersion(O5mreader *pReader, O5mreaderDataset* 
 		if (o5mreader_thereAreNoMoreData(pReader))
 			return O5MREADER_ITERATE_RET_DONE;
 
-		if (o5mreader_readStrPair(pReader, &pReader->tagPair, 0) == O5MREADER_ITERATE_RET_ERR) {
+		char* tagPair = NULL;
+		if (o5mreader_readStrPair(pReader, &tagPair, 0) == O5MREADER_ITERATE_RET_ERR) {
 			return O5MREADER_ITERATE_RET_ERR;
 		}
 	}
@@ -385,13 +386,14 @@ O5mreaderIterateRet o5mreader_iterateTags(O5mreader *pReader, char** pKey, char*
 		return O5MREADER_ITERATE_RET_DONE;
 	}
 
-	if (o5mreader_readStrPair(pReader, &pReader->tagPair, 0) == O5MREADER_RET_ERR) {
+	char* tagPair = NULL;
+	if (o5mreader_readStrPair(pReader, &tagPair, 0) == O5MREADER_RET_ERR) {
 		return O5MREADER_ITERATE_RET_ERR;
 	}
 	if (pKey)
-		*pKey = pReader->tagPair;
+		*pKey = tagPair;
 	if (pVal)
-		*pVal = pReader->tagPair + strlen(pReader->tagPair) + 1;
+		*pVal = tagPair + strlen(tagPair) + 1;
 
 	return O5MREADER_ITERATE_RET_NEXT;
 }
@@ -471,11 +473,12 @@ O5mreaderIterateRet o5mreader_iterateRefs(O5mreader *pReader, uint64_t *refId, u
 
 	//fread(_,1,1,pReader->f);
 
-	if (o5mreader_readStrPair(pReader, &pReader->tagPair, 1) == O5MREADER_RET_ERR) {
+	char* tagPair = NULL;
+	if (o5mreader_readStrPair(pReader, &tagPair, 1) == O5MREADER_RET_ERR) {
 		return O5MREADER_ITERATE_RET_ERR;
 	}
 
-	switch (pReader->tagPair[0]) {
+	switch (*tagPair) {
 	case '0':
 		if (type)
 			*type = O5MREADER_DS_NODE;
@@ -500,7 +503,7 @@ O5mreaderIterateRet o5mreader_iterateRefs(O5mreader *pReader, uint64_t *refId, u
 	}
 
 	if (pRole) {
-		*pRole = pReader->tagPair + 1;
+		*pRole = tagPair + 1;
 	}
 
 	return O5MREADER_ITERATE_RET_NEXT;
@@ -562,15 +565,15 @@ O5mreaderIterateRet o5mreader_iterateDataSet(O5mreader *pReader, O5mreaderDatase
 			if ( o5mreader_readUInt(pReader,&pReader->offset) == O5MREADER_RET_ERR ) {		
 				return O5MREADER_ITERATE_RET_ERR;
 			}
-			pReader->current = bftell(pReader->f);		
-			
+			pReader->current = bftell(pReader->f);
+
 			switch ( ds->type ) {
-				case O5MREADER_DS_NODE:					
-					return o5mreader_readNode(pReader, ds);						
+				case O5MREADER_DS_NODE:
+					return o5mreader_readNode(pReader, ds);
 				case O5MREADER_DS_WAY:
-					return o5mreader_readWay(pReader, ds);						
+					return o5mreader_readWay(pReader, ds);
 				case O5MREADER_DS_REL:
-					return o5mreader_readRel(pReader, ds);	
+					return o5mreader_readRel(pReader, ds);
 				/*					
 				case O5MREADER_DS_BBOX:
 				case O5MREADER_DS_TSTAMP:
