@@ -7,3 +7,9 @@
 [submodule "snappy"]
 	path = snappy
 	url = https://github.com/ukoethe/snappy.git
+[submodule "libspatialindex"]
+	path = libspatialindex
+	url = https://github.com/Hemofektik/libspatialindex.git
+[submodule "ZFXMath"]
+	path = ZFXMath
+	url = https://github.com/Hemofektik/ZFXMath.git

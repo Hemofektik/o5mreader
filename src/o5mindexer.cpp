@@ -2,20 +2,31 @@
 #include <iostream>
 #include <iomanip>
 #include <chrono>
+#include <algorithm>
+#include <vector>
 
 #include "o5mreader.h"
 #include <leveldb/db.h>
 #include <leveldb/write_batch.h>
 
+#include <spatialindex/SpatialIndex.h>
+#include <ZFXMath.h>
+
+#include "MGArchive.h"
+
 using namespace std;
 using namespace std::chrono;
 using namespace leveldb;
+using namespace SpatialIndex;
+using namespace ZFXMath;
 
+
+typedef TFixed<int32_t, 7> O5MCoord;
 
 struct NodeValue
 {
-	int32_t lon;
-	int32_t lat;
+	O5MCoord lon;
+	O5MCoord lat;
 	uint64_t fileOffset;
 	uint64_t readerOffset;
 };
@@ -24,12 +35,105 @@ struct NodeValue
 static int numDBReadNodes = 1;
 static high_resolution_clock::time_point readNodeFromDB_T1;
 
+
+struct BBox
+{
+	O5MCoord minX;
+	O5MCoord minY;
+	O5MCoord maxX;
+	O5MCoord maxY;
+};
+
+class Tag
+{
+public:
+	string key;
+	string value;
+};
+
+class Way
+{
+public:
+	uint64_t id;
+	BBox bbox;
+	TPolygon2D<TFixed<int32_t, 7>> polygon;
+	vector<Tag> tags;
+};
+
+
+MGArchive& operator<<(MGArchive& archive, BBox& bbox)
+{
+	archive << bbox.minX << bbox.minY << bbox.maxX << bbox.maxY;
+	return archive;
+}
+
+MGArchive& operator<<(MGArchive& archive, Tag& tag)
+{
+	archive << tag.key << tag.value;
+	return archive;
+}
+
+template<typename T>
+MGArchive& operator<<(MGArchive& archive, TPolygon2D<T>& polygon)
+{
+	if (archive.IsSaving())
+	{
+		uint64_t numVertices = polygon.GetNumVertices();
+		archive << numVertices;
+		archive.Serialize((const char*)polygon.GetVertices(), numVertices * sizeof(TVector2D<T>));
+	}
+	else
+	{
+		uint64_t numVertices;
+		archive << numVertices;
+		polygon.SetNumVertices((int)numVertices);
+		archive.Serialize((char*)polygon.GetVertices(), numVertices * sizeof(TVector2D<T>));
+	}
+
+	return archive;
+}
+
+template<typename T>
+MGArchive& operator<<(MGArchive& archive, vector<T>& v)
+{
+	uint64_t numElements = v.size();
+	archive << numElements;
+
+	if (archive.IsLoading())
+	{
+		v.resize(numElements);
+	}
+
+	for (size_t i = 0; i < numElements; i++)
+	{
+		archive << v[i];
+	}
+
+	return archive;
+}
+
+MGArchive& operator<<(MGArchive& archive, Way& way)
+{
+	archive << way.id << way.bbox << way.polygon << way.tags;
+	return archive;
+}
+
+
 #pragma optimize( "", off )
-void ReadWay(O5mreader* reader, DB *db)
+void ReadWay(O5mreader* reader, DB *db, const uint64_t& wayId)
 {
 	ReadOptions ro;
 	uint64_t nodeId;
 	O5mreaderIterateRet ret;
+
+	Way way;
+	way.id = wayId;
+
+	BBox bb;
+	bb.minX.value = numeric_limits<int32_t>::max();
+	bb.minY.value = numeric_limits<int32_t>::max();
+	bb.maxX.value = numeric_limits<int32_t>::min();
+	bb.maxY.value = numeric_limits<int32_t>::min();
 
 	if (readNodeFromDB_T1 == high_resolution_clock::time_point::time_point())
 	{
@@ -47,16 +151,34 @@ void ReadWay(O5mreader* reader, DB *db)
 				NodeValue node;
 				memcpy(&node, value.c_str(), sizeof(NodeValue));
 
-				node.lon++;
+				bb.minX = Min(bb.minX, node.lon);
+				bb.minY = Min(bb.minY, node.lat);
+				bb.maxX = Max(bb.maxX, node.lon);
+				bb.maxY = Max(bb.maxY, node.lat);
+
+				TVector2D<O5MCoord> nodeLocation(node.lon, node.lat);
+				way.polygon.AddVertex(nodeLocation);
 			}
 		}
 		numDBReadNodes++;
 	}
 
+	way.bbox = bb;
+
 	char *key, *val;
-	while ((ret = o5mreader_iterateTags(reader, &key, &val)) == O5MREADER_ITERATE_RET_NEXT) {
-		// Could do something with tag key and val
+	while ((ret = o5mreader_iterateTags(reader, &key, &val)) == O5MREADER_ITERATE_RET_NEXT) 
+	{
+		Tag tag;
+		tag.key = key;
+		tag.value = val;
+		way.tags.push_back(tag);
 	}
+
+	MGArchive archive;
+	archive << way;
+
+	uint64_t waySize = 0;
+	char* serializedWay = archive.ToByteStream(waySize);
 }
 
 #pragma optimize( "", on )
@@ -78,9 +200,6 @@ int main()
 	options.create_if_missing = true;
 	options.write_buffer_size = 100 << 20;
 	DB::Open(options, nodeDBFilePath, &db);
-
-
-
 
 	FILE* f = fopen("../test/files/antarctica-2016-01-06.osm.o5m", "rb");
 	
@@ -104,8 +223,8 @@ int main()
 				if (ds.isEmpty) break;
 
 				NodeValue nv;
-				nv.lon = ds.lon;
-				nv.lat = ds.lat;
+				nv.lon.value = ds.lon;
+				nv.lat.value = ds.lat;
 				nv.fileOffset = reader->f->fOffset;
 				nv.readerOffset = reader->offset;
 
@@ -126,7 +245,7 @@ int main()
 				break;
 			}
 			case O5MREADER_DS_WAY:
-				ReadWay(reader, db);
+				ReadWay(reader, db, ds.id);
 				break;
 			case O5MREADER_DS_REL:
 				// Could do something with ds.id

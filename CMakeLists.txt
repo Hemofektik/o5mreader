@@ -34,13 +34,18 @@ endif()
 include_directories(
 	${CMAKE_SOURCE_DIR}/leveldb/include
 	${CMAKE_SOURCE_DIR}/snappy/
+	${CMAKE_SOURCE_DIR}/libspatialindex/include
+	${CMAKE_SOURCE_DIR}/ZFXMath/include
 )
+
 add_subdirectory(snappy)
 add_subdirectory(leveldb)
+add_subdirectory(libspatialindex)
 
 link_libraries (	
 	leveldb
 	snappy
+	spatialindex-64
 )
 
 
