@@ -18,10 +18,11 @@ using namespace std;
 using namespace std::chrono;
 using namespace leveldb;
 using namespace SpatialIndex;
+using namespace SpatialIndex::RTree;
 using namespace ZFXMath;
 
 
-typedef TFixed<int32_t, 7> O5MCoord;
+typedef int32_t O5MCoord;
 
 struct NodeValue
 {
@@ -120,7 +121,7 @@ MGArchive& operator<<(MGArchive& archive, Way& way)
 
 
 #pragma optimize( "", off )
-void ReadWay(O5mreader* reader, DB *db, const uint64_t& wayId)
+void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& wayId)
 {
 	ReadOptions ro;
 	uint64_t nodeId;
@@ -130,10 +131,10 @@ void ReadWay(O5mreader* reader, DB *db, const uint64_t& wayId)
 	way.id = wayId;
 
 	BBox bb;
-	bb.minX.value = numeric_limits<int32_t>::max();
-	bb.minY.value = numeric_limits<int32_t>::max();
-	bb.maxX.value = numeric_limits<int32_t>::min();
-	bb.maxY.value = numeric_limits<int32_t>::min();
+	bb.minX = numeric_limits<int32_t>::max();
+	bb.minY = numeric_limits<int32_t>::max();
+	bb.maxX = numeric_limits<int32_t>::min();
+	bb.maxY = numeric_limits<int32_t>::min();
 
 	if (readNodeFromDB_T1 == high_resolution_clock::time_point::time_point())
 	{
@@ -179,6 +180,13 @@ void ReadWay(O5mreader* reader, DB *db, const uint64_t& wayId)
 
 	uint64_t waySize = 0;
 	char* serializedWay = archive.ToByteStream(waySize);
+
+	double min[2]{ bb.minX * 0.0000001, bb.minY * 0.0000001 };
+	double max[2]{ bb.maxX * 0.0000001, bb.maxY * 0.0000001 };
+	Region siBB(min, max, 2);
+	tree->insertData((uint32_t)waySize, (const byte*)serializedWay, siBB, wayId);
+
+	delete[] serializedWay;
 }
 
 #pragma optimize( "", on )
@@ -192,8 +200,13 @@ int main()
 	uint8_t type;
 	char *role;
 
+
 	string nodeDBFilePath = "../test/files/antarctica-2016-01-06.osm.o5m.nd-idx";
-	
+	string wayDBFilePath = "../test/files/antarctica-2016-01-06.osm.o5m.way";
+
+	Tools::PropertySet ps;
+	IStorageManager* diskfile = StorageManager::createNewDiskStorageManager(wayDBFilePath, 4 << 10);
+	ISpatialIndex* tree = returnRTree(*diskfile, ps);
 
 	DB *db;
 	Options options;
@@ -223,8 +236,8 @@ int main()
 				if (ds.isEmpty) break;
 
 				NodeValue nv;
-				nv.lon.value = ds.lon;
-				nv.lat.value = ds.lat;
+				nv.lon = ds.lon;
+				nv.lat = ds.lat;
 				nv.fileOffset = reader->f->fOffset;
 				nv.readerOffset = reader->offset;
 
@@ -232,20 +245,10 @@ int main()
 					Slice((const char*)&ds.id, sizeof(uint64_t)),
 					Slice((const char*)&nv, sizeof(NodeValue)));
 
-				// Could do something with ds.id, ds.lon, ds.lat here, lon and lat are ints in 1E+7 * degree units
-				// Node tags iteration, can be omited
-				/*while ((ret2 = o5mreader_iterateTags(reader, &key, &val)) == O5MREADER_ITERATE_RET_NEXT)
-				{
-					if (key == val)
-					{
-
-					}
-					// Could do something with tag key and val
-				}*/
 				break;
 			}
 			case O5MREADER_DS_WAY:
-				ReadWay(reader, db, ds.id);
+				ReadWay(reader, db, tree, ds.id);
 				break;
 			case O5MREADER_DS_REL:
 				// Could do something with ds.id
@@ -291,6 +294,9 @@ int main()
 	wb.Clear();
 
 	delete db;
+
+	delete tree;
+	delete diskfile;
 
 	o5mreader_close(reader);
 	fclose(f);
