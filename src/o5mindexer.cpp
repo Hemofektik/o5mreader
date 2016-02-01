@@ -36,7 +36,8 @@ struct NodeValue
 };
 
 
-static int numDBReadNodes = 1;
+static int numDBReadNodes = 0;
+static int numDBReadNodesPreviously = 0;
 static high_resolution_clock::time_point readNodeFromDB_T1;
 
 
@@ -122,7 +123,7 @@ MGArchive& operator<<(MGArchive& archive, Way& way)
 	return archive;
 }
 
-//#pragma optimize( "", off )
+#pragma optimize( "", off )
 
 Slice IdToSlice(const uint64_t& id)
 {
@@ -140,17 +141,11 @@ class OSMIdComparator : public Comparator {
 public:
 	virtual int Compare(const Slice& a, const Slice& b) const
 	{
-		uint8_t* idA = (uint8_t*)a.data();
-		uint8_t* idB = (uint8_t*)b.data();
-		for (int b = 7; b >= 0; b--)
-		{
-			int delta = idA[b] - idB[b];
-			if (delta != 0)
-			{
-				return delta;
-			}
-		}
-		return 0;
+		uint64_t* idA = (uint64_t*)a.data();
+		uint64_t* idB = (uint64_t*)b.data();
+		int64_t delta = (*idA - *idB);
+		if (delta == 0) return 0;
+		return delta < 0 ? -1 : 1;
 	}
 
 	virtual const char* Name() const
@@ -182,14 +177,14 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 	vector<uint64_t> nodeIds;
 	nodeIds.reserve(1000);
 
-	uint64_t nodeId;	
+	uint64_t nodeId;
 	O5mreaderIterateRet ret;
 	while ((ret = o5mreader_iterateNds(reader, &nodeId)) == O5MREADER_ITERATE_RET_NEXT) 
 	{
 		nodeIds.push_back(nodeId);
 	}
 
-	auto nodes = nodeIds.data();
+	way.polygon.SetNumVertices((int)nodeIds.size());
 
 	ReadOptions ro;
 	auto iterator = db->NewIterator(ro);
@@ -207,14 +202,12 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 			if (delta > 5)
 			{
 				iterator->Seek(IdToSlice(nodeId));
+				continue;
 			}
 			else
 			{
-				while(delta > 0)
-				{
-					iterator->Next();
-					delta--;
-				}
+				iterator->Next();
+				continue;
 			}
 		}
 		if (delta < 0)
@@ -222,38 +215,38 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 			if (delta < 5)
 			{
 				iterator->Seek(IdToSlice(nodeId));
+				continue;
 			}
 			else
 			{
-				while (delta < 0)
-				{
-					iterator->Prev();
-					delta++;
-				}
+				iterator->Prev();
+				continue;
 			}
 		}
 
 		Slice value = iterator->value();
-		if (sizeof(NodeValue) == value.size())
-		{
-			NodeValue node;
-			memcpy(&node, value.data(), sizeof(NodeValue));
+		NodeValue& node = *((NodeValue*)value.data());
 
-			bb.minX = Min(bb.minX, node.lon);
-			bb.minY = Min(bb.minY, node.lat);
-			bb.maxX = Max(bb.maxX, node.lon);
-			bb.maxY = Max(bb.maxY, node.lat);
+		bb.minX = Min(bb.minX, node.lon);
+		bb.minY = Min(bb.minY, node.lat);
+		bb.maxX = Max(bb.maxX, node.lon);
+		bb.maxY = Max(bb.maxY, node.lat);
 
-			TVector2D<O5MCoord> nodeLocation(node.lon, node.lat);
-			way.polygon.AddVertex(nodeLocation);
+		TVector2D<O5MCoord> nodeLocation(node.lon, node.lat);
+		way.polygon.SetVertex(nodeIndex, nodeLocation);
 
-			numDBReadNodes++;
-		}
-
+		numDBReadNodes++;
 		nodeIndex++;
 		if (nodeIndex >= nodeIds.size()) break;
 
 		iterator->Next();
+	}
+
+	bool outputNodeTags = false;
+	if (nodeIndex < nodeIds.size())
+	{
+		cout << "Broken Way! Nodes are missing! wayId: " << wayId << endl;
+		outputNodeTags = true;
 	}
 
 	delete iterator;
@@ -267,6 +260,11 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 		tag.key = key;
 		tag.value = val;
 		way.tags.push_back(tag);
+
+		if (outputNodeTags)
+		{
+			cout << key << " --- " << wayId << endl;
+		}
 	}
 
 	MGArchive archive;
@@ -308,6 +306,8 @@ void TestSpatialIndexSpeed(string& wayDBFilePath)
 	IStorageManager* diskfile = StorageManager::loadDiskStorageManager(wayDBFilePath);
 	ISpatialIndex* tree = loadRTree(*diskfile, 1);
 
+	high_resolution_clock::time_point t1 = high_resolution_clock::now();
+
 	GetAllWays getAllWays;
 
 	double min[2]{ -180.0, -90.0 };
@@ -316,6 +316,10 @@ void TestSpatialIndexSpeed(string& wayDBFilePath)
 	tree->intersectsWithQuery(queryAABB, getAllWays);
 
 	cout << "Num Ways returned: " << getAllWays.ways.size() << "                               " << endl;
+	high_resolution_clock::time_point t2 = high_resolution_clock::now();
+	duration<double> time_span = duration_cast<duration<double>>(t2 - t1);
+
+	cout << "Num Query took seconds: " << time_span.count() << "                               " << endl;
 }
 
 #pragma optimize( "", on )
@@ -330,14 +334,14 @@ int main()
 	char *role;
 
 
-	string baseFile = "netherlands-latest.osm.o5m";
-	//string baseFile = "antarctica-2016-01-06.osm.o5m";
+	//string baseFile = "netherlands-latest.osm.o5m";
+	string baseFile = "antarctica-2016-01-06.osm.o5m";
 
 	string nodeDBFilePath = "../test/files/" + baseFile + ".nd-idx";
 	string wayDBFilePath = "../test/files/" + baseFile + ".way";
 
-	//TestSpatialIndexSpeed(wayDBFilePath);
-	//return 0;
+	TestSpatialIndexSpeed(wayDBFilePath);
+	return 0;
 
 	Tools::PropertySet ps;
 	IStorageManager* diskfile = StorageManager::createNewDiskStorageManager(wayDBFilePath, 4 << 10);
@@ -358,7 +362,6 @@ int main()
 
 	WriteBatch wb;
 	WriteOptions wo;
-
 
 	high_resolution_clock::time_point t1 = high_resolution_clock::now();
 
@@ -412,14 +415,15 @@ int main()
 				break;
 		}
 
-		uint64_t numNodesReadIntermediate = 0xFFF;
-		if ((numDBReadNodes & numNodesReadIntermediate) == 0)
+		int numNodesReadIntermediate = numDBReadNodes - numDBReadNodesPreviously;
+		if (numNodesReadIntermediate > 100000)
 		{
 			high_resolution_clock::time_point readNodeFromDB_T2 = high_resolution_clock::now();
 			duration<double> time_span = duration_cast<duration<double>>(readNodeFromDB_T2 - readNodeFromDB_T1);
 			
 			cout << "Num Nodes read per second: " << (int)(numNodesReadIntermediate / time_span.count()) << "                         \r";
 
+			numDBReadNodesPreviously = numDBReadNodes;
 			readNodeFromDB_T1 = readNodeFromDB_T2;
 		}
 
