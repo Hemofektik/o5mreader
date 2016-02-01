@@ -4,15 +4,18 @@
 #include <chrono>
 #include <algorithm>
 #include <vector>
+#include <filesystem>
 
 #include "o5mreader.h"
 #include <leveldb/db.h>
 #include <leveldb/write_batch.h>
+#include <leveldb/comparator.h>
 
 #include <spatialindex/SpatialIndex.h>
 #include <ZFXMath.h>
 
 #include "MGArchive.h"
+#include "o5mindexer.h"
 
 using namespace std;
 using namespace std::chrono;
@@ -119,14 +122,49 @@ MGArchive& operator<<(MGArchive& archive, Way& way)
 	return archive;
 }
 
+//#pragma optimize( "", off )
 
-#pragma optimize( "", off )
+Slice IdToSlice(const uint64_t& id)
+{
+	Slice slice((const char*)&id, sizeof(uint64_t));
+	return slice;
+}
+
+uint64_t SliceToId(const Slice slice)
+{
+	uint64_t* id = (uint64_t*)slice.data();
+	return *id;
+}
+
+class OSMIdComparator : public Comparator {
+public:
+	virtual int Compare(const Slice& a, const Slice& b) const
+	{
+		uint8_t* idA = (uint8_t*)a.data();
+		uint8_t* idB = (uint8_t*)b.data();
+		for (int b = 7; b >= 0; b--)
+		{
+			int delta = idA[b] - idB[b];
+			if (delta != 0)
+			{
+				return delta;
+			}
+		}
+		return 0;
+	}
+
+	virtual const char* Name() const
+	{
+		return "OSMIdComparator";
+	}
+
+	virtual void FindShortestSeparator( std::string* start, const Slice& limit) const {};
+	virtual void FindShortSuccessor(std::string* key) const {};
+};
+
+
 void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& wayId)
 {
-	ReadOptions ro;
-	uint64_t nodeId;
-	O5mreaderIterateRet ret;
-
 	Way way;
 	way.id = wayId;
 
@@ -141,28 +179,84 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 		readNodeFromDB_T1 = high_resolution_clock::now();
 	}
 
+	vector<uint64_t> nodeIds;
+	nodeIds.reserve(1000);
+
+	uint64_t nodeId;	
+	O5mreaderIterateRet ret;
 	while ((ret = o5mreader_iterateNds(reader, &nodeId)) == O5MREADER_ITERATE_RET_NEXT) 
 	{
-		string value;
-		auto status = db->Get(ro, Slice((const char*)&nodeId, sizeof(uint64_t)), &value);
-		if (status.ok())
+		nodeIds.push_back(nodeId);
+	}
+
+	auto nodes = nodeIds.data();
+
+	ReadOptions ro;
+	auto iterator = db->NewIterator(ro);
+	iterator->Seek(IdToSlice(nodeIds[0]));
+
+	int nodeIndex = 0;
+	while (iterator->Valid())
+	{
+		uint64_t nodeId = nodeIds[nodeIndex];
+		uint64_t iteratorId = SliceToId(iterator->key());
+
+		int64_t delta = nodeId - iteratorId;
+		if (delta > 0)
 		{
-			if (sizeof(NodeValue) == value.length())
+			if (delta > 5)
 			{
-				NodeValue node;
-				memcpy(&node, value.c_str(), sizeof(NodeValue));
-
-				bb.minX = Min(bb.minX, node.lon);
-				bb.minY = Min(bb.minY, node.lat);
-				bb.maxX = Max(bb.maxX, node.lon);
-				bb.maxY = Max(bb.maxY, node.lat);
-
-				TVector2D<O5MCoord> nodeLocation(node.lon, node.lat);
-				way.polygon.AddVertex(nodeLocation);
+				iterator->Seek(IdToSlice(nodeId));
+			}
+			else
+			{
+				while(delta > 0)
+				{
+					iterator->Next();
+					delta--;
+				}
 			}
 		}
-		numDBReadNodes++;
+		if (delta < 0)
+		{
+			if (delta < 5)
+			{
+				iterator->Seek(IdToSlice(nodeId));
+			}
+			else
+			{
+				while (delta < 0)
+				{
+					iterator->Prev();
+					delta++;
+				}
+			}
+		}
+
+		Slice value = iterator->value();
+		if (sizeof(NodeValue) == value.size())
+		{
+			NodeValue node;
+			memcpy(&node, value.data(), sizeof(NodeValue));
+
+			bb.minX = Min(bb.minX, node.lon);
+			bb.minY = Min(bb.minY, node.lat);
+			bb.maxX = Max(bb.maxX, node.lon);
+			bb.maxY = Max(bb.maxY, node.lat);
+
+			TVector2D<O5MCoord> nodeLocation(node.lon, node.lat);
+			way.polygon.AddVertex(nodeLocation);
+
+			numDBReadNodes++;
+		}
+
+		nodeIndex++;
+		if (nodeIndex >= nodeIds.size()) break;
+
+		iterator->Next();
 	}
+
+	delete iterator;
 
 	way.bbox = bb;
 
@@ -189,6 +283,41 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 	delete[] serializedWay;
 }
 
+class GetAllWays : public IVisitor
+{
+public:
+	vector<uint64_t> ways;
+
+	virtual void visitNode(const INode& in) 
+	{
+	}
+	virtual void visitData(const IData& in) 
+	{
+		uint64_t id = in.getIdentifier();
+		ways.push_back(id);
+	}
+	virtual void visitData(std::vector<const IData*>& v) 
+	{
+		//uint64_t id = v.getIdentifier();
+		ways.push_back(0);
+	}
+};
+
+void TestSpatialIndexSpeed(string& wayDBFilePath)
+{
+	IStorageManager* diskfile = StorageManager::loadDiskStorageManager(wayDBFilePath);
+	ISpatialIndex* tree = loadRTree(*diskfile, 1);
+
+	GetAllWays getAllWays;
+
+	double min[2]{ -180.0, -90.0 };
+	double max[2]{ 180.0, 90.0 };
+	Region queryAABB(min, max, 2);
+	tree->intersectsWithQuery(queryAABB, getAllWays);
+
+	cout << "Num Ways returned: " << getAllWays.ways.size() << "                               " << endl;
+}
+
 #pragma optimize( "", on )
 int main() 
 {
@@ -201,25 +330,35 @@ int main()
 	char *role;
 
 
-	string nodeDBFilePath = "../test/files/antarctica-2016-01-06.osm.o5m.nd-idx";
-	string wayDBFilePath = "../test/files/antarctica-2016-01-06.osm.o5m.way";
+	string baseFile = "netherlands-latest.osm.o5m";
+	//string baseFile = "antarctica-2016-01-06.osm.o5m";
+
+	string nodeDBFilePath = "../test/files/" + baseFile + ".nd-idx";
+	string wayDBFilePath = "../test/files/" + baseFile + ".way";
+
+	//TestSpatialIndexSpeed(wayDBFilePath);
+	//return 0;
 
 	Tools::PropertySet ps;
 	IStorageManager* diskfile = StorageManager::createNewDiskStorageManager(wayDBFilePath, 4 << 10);
 	ISpatialIndex* tree = returnRTree(*diskfile, ps);
 
-	DB *db;
+	DB* db = NULL;	
+	bool writeDB = !experimental::filesystem::exists(nodeDBFilePath);
 	Options options;
+	options.comparator = new OSMIdComparator();
 	options.create_if_missing = true;
 	options.write_buffer_size = 100 << 20;
 	DB::Open(options, nodeDBFilePath, &db);
 
-	FILE* f = fopen("../test/files/antarctica-2016-01-06.osm.o5m", "rb");
+	string srcFilePath = "../test/files/" + baseFile;
+	FILE* f = fopen(srcFilePath.c_str(), "rb");
 	
 	o5mreader_open(&reader, f);
 
 	WriteBatch wb;
 	WriteOptions wo;
+
 
 	high_resolution_clock::time_point t1 = high_resolution_clock::now();
 
@@ -235,19 +374,29 @@ int main()
 			{
 				if (ds.isEmpty) break;
 
-				NodeValue nv;
-				nv.lon = ds.lon;
-				nv.lat = ds.lat;
-				nv.fileOffset = reader->f->fOffset;
-				nv.readerOffset = reader->offset;
+				if(writeDB)
+				{
+					NodeValue nv;
+					nv.lon = ds.lon;
+					nv.lat = ds.lat;
+					nv.fileOffset = reader->f->fOffset;
+					nv.readerOffset = reader->offset;
 
-				wb.Put(
-					Slice((const char*)&ds.id, sizeof(uint64_t)),
-					Slice((const char*)&nv, sizeof(NodeValue)));
-
+					wb.Put(IdToSlice(ds.id), Slice((const char*)&nv, sizeof(NodeValue)));
+				}
 				break;
 			}
 			case O5MREADER_DS_WAY:
+
+				if (writeDB) // write last few node entries before reading ways
+				{
+					writeDB = false;
+					db->Write(wo, &wb);
+					wb.Clear();
+
+					db->CompactRange(NULL, NULL);
+				}
+
 				ReadWay(reader, db, tree, ds.id);
 				break;
 			case O5MREADER_DS_REL:
@@ -263,9 +412,9 @@ int main()
 				break;
 		}
 
-		if ((numDBReadNodes & 0xFF) == 0)
+		uint64_t numNodesReadIntermediate = 0xFFF;
+		if ((numDBReadNodes & numNodesReadIntermediate) == 0)
 		{
-			uint64_t numNodesReadIntermediate = 0xFF;
 			high_resolution_clock::time_point readNodeFromDB_T2 = high_resolution_clock::now();
 			duration<double> time_span = duration_cast<duration<double>>(readNodeFromDB_T2 - readNodeFromDB_T1);
 			
@@ -276,8 +425,11 @@ int main()
 
 		if ((numDataSetsRead & 0x7FFFF) == 0)
 		{
-			db->Write(wo, &wb);
-			wb.Clear();
+			if(writeDB)
+			{
+				db->Write(wo, &wb);
+				wb.Clear();
+			}
 
 			uint64_t numDataSetsReadIntermediate = numDataSetsRead - numDataSetsReadPreviously;
 			high_resolution_clock::time_point t2 = high_resolution_clock::now();
@@ -290,9 +442,7 @@ int main()
 		}
 	}
 
-	db->Write(wo, &wb);
-	wb.Clear();
-
+	delete options.comparator;
 	delete db;
 
 	delete tree;
