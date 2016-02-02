@@ -252,15 +252,17 @@ public:
 				AddEntry(page, len, data);
 				it = pageIndex.find(page);
 			}
-
-			if (len > it->second->length)
+			else
 			{
-				delete[] it->second->data;
-				it->second->data = new byte[len];
+				if (len > it->second->length)
+				{
+					delete[] it->second->data;
+					it->second->data = new byte[len];
+				}
+				it->second->length = len;
+				memcpy(it->second->data, data, len);
+				it->second->useIndex = currentUseIndex;
 			}
-			it->second->length = len;
-			memcpy(it->second->data, data, len);
-			it->second->useIndex = currentUseIndex;
 		}
 
 		currentUseIndex++;
