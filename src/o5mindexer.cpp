@@ -274,9 +274,14 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 	uint64_t waySize = 0;
 	char* serializedWay = archive.ToByteStream(waySize);
 
-	double min[2]{ bb.minX * 0.0000001, bb.minY * 0.0000001 };
-	double max[2]{ bb.maxX * 0.0000001, bb.maxY * 0.0000001 };
-	Region siBB(min, max, 2);
+	O5MCoord sizeX = bb.maxX - bb.minX;
+	O5MCoord sizeY = bb.maxY - bb.minY;
+	O5MCoord sizeMin = min(sizeX, sizeY);
+	O5MCoord sizeMax = min(sizeX, sizeY);
+
+	double min[3]{ bb.minX * 0.0000001, bb.minY * 0.0000001, sizeMin * 0.0000001 };
+	double max[3]{ bb.maxX * 0.0000001, bb.maxY * 0.0000001, sizeMax * 0.0000001 };
+	Region siBB(min, max, 3);
 	tree->insertData((uint32_t)waySize, (const byte*)serializedWay, siBB, wayId);
 
 	delete[] serializedWay;
@@ -293,7 +298,6 @@ public:
 	virtual void visitData(const IData& in) 
 	{
 		uint64_t id = in.getIdentifier();
-		ways.push_back(id);
 
 		const bool doDataDeserialization = true;
 		if(doDataDeserialization)
@@ -305,6 +309,15 @@ public:
 			MGArchive archive((const char*)data, dataLen);
 			Way way;
 			archive << way;
+
+			for (size_t i = 0; i < way.tags.size(); i++)
+			{
+				if (way.tags[i].key == "area")
+				{
+					ways.push_back(id);
+					break;
+				}
+			}
 
 			delete data;
 		}
@@ -324,9 +337,9 @@ void TestSpatialIndexSpeed(string& wayDBFilePath)
 
 	GetAllWays getAllWays;
 
-	double min[2]{ 4.7, 52.5 };
-	double max[2]{ 4.8, 53.6 };
-	Region queryAABB(min, max, 2);
+	double min[3]{ 4.0, 52.0, 0.002 };
+	double max[3]{ 5.0, 53.0, 500.0 };
+	Region queryAABB(min, max, 3);
 	tree->intersectsWithQuery(queryAABB, getAllWays);
 
 	cout << "Num Ways returned: " << getAllWays.ways.size() << "                               " << endl;
@@ -347,7 +360,6 @@ int main()
 	uint8_t type;
 	char *role;
 
-
 	string baseFile = "netherlands.osm.o5m";
 	//string baseFile = "antarctica-2016-01-06.osm.o5m";
 
@@ -358,9 +370,9 @@ int main()
 	TestSpatialIndexSpeed(wayDBFilePath);
 	return 0;
 
-	Tools::PropertySet ps;
+	SpatialIndex::id_type indexId = 0;
 	IStorageManager* diskfile = StorageManager::createNewDiskStorageManager(wayDBFilePath, 4 << 10);
-	ISpatialIndex* tree = returnRTree(*diskfile, ps);
+	ISpatialIndex* tree = createNewRTree(*diskfile, 0.7, 100, 100, 3, RV_RSTAR, indexId);
 
 	DB* db = NULL;	
 	bool writeDB = !experimental::filesystem::exists(nodeDBFilePath);
