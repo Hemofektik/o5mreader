@@ -13,6 +13,7 @@
 #include <leveldb/filter_policy.h>
 
 #include <spatialindex/SpatialIndex.h>
+
 #include <ZFXMath.h>
 
 #include "MGArchive.h"
@@ -24,6 +25,7 @@ using namespace leveldb;
 using namespace SpatialIndex;
 using namespace SpatialIndex::RTree;
 using namespace ZFXMath;
+
 
 
 typedef int32_t O5MCoord;
@@ -159,6 +161,101 @@ public:
 };
 
 
+
+class CachedDiskStorageManager : public SpatialIndex::IStorageManager
+{
+public:
+	CachedDiskStorageManager(const string& filePath)
+		: db(NULL)
+		, wasChanged(false)
+		, nextPage(1)
+	{
+		options.comparator = new OSMIdComparator();
+		options.create_if_missing = true;
+		options.write_buffer_size = 10 << 20;
+		options.filter_policy = NewBloomFilterPolicy(32);
+		DB::Open(options, filePath, &db);
+	}
+	virtual ~CachedDiskStorageManager() 
+	{
+		flush();
+	}
+
+	virtual void flush() 
+	{
+		if (wasChanged)
+		{
+			db->CompactRange(NULL, NULL);
+		}
+
+		delete options.comparator;
+		delete db;
+		delete options.filter_policy;
+	}
+
+	virtual void loadByteArray(const id_type page, uint32_t& len, byte** data) 
+	{
+		*data = NULL;
+		len = 0;
+
+		// TODO: load from pageIndex
+
+		WriteOptions wo;
+		db->Write(wo, &writeBatch);
+		writeBatch.Clear();
+
+		ReadOptions ro;
+		string result;
+		if (db->Get(ro, IdToSlice(page), &result).ok())
+		{
+			len = (uint32_t)result.size();
+			*data = new byte[len];
+			memcpy(*data, result.data(), len);
+		}
+	}
+
+	virtual void storeByteArray(id_type& page, const uint32_t len, const byte* const data) 
+	{
+		wasChanged = true;
+
+		if (page == StorageManager::NewPage)
+		{
+			page = nextPage;
+			nextPage++;
+		}
+
+		// TODO: store to pageIndex
+
+		writeBatch.Put(IdToSlice(page), Slice((const char*)data, len));
+	}
+
+	virtual void deleteByteArray(const id_type page)
+	{
+		wasChanged = true;
+
+		// TODO: delete from pageIndex
+
+		writeBatch.Delete(IdToSlice(page));
+	}
+
+private:
+	class Entry
+	{
+	public:
+		uint32_t length;
+		byte* data;
+		uint64_t fileOffset;
+	};
+
+	DB* db;
+	Options options;
+	bool wasChanged;
+	WriteBatch writeBatch;
+
+	id_type nextPage;
+	std::map<id_type, Entry> pageIndex;
+};
+
 void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& wayId)
 {
 	Way way;
@@ -193,8 +290,6 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 		tag.value = val;
 		way.tags.push_back(tag);
 	}
-
-	// TODO: push way to queue to let the worker threads compute the bounding box
 
 	way.polygon.SetNumVertices((int)nodeIds.size());
 
@@ -367,11 +462,11 @@ int main()
 	string nodeDBFilePath = root + baseFile + ".nd-idx";
 	string wayDBFilePath = root + baseFile + ".way";
 
-	TestSpatialIndexSpeed(wayDBFilePath);
-	return 0;
+	//TestSpatialIndexSpeed(wayDBFilePath);
+	//return 0;
 
 	SpatialIndex::id_type indexId = 0;
-	IStorageManager* diskfile = StorageManager::createNewDiskStorageManager(wayDBFilePath, 4 << 10);
+	IStorageManager* diskfile = new CachedDiskStorageManager(wayDBFilePath);
 	ISpatialIndex* tree = createNewRTree(*diskfile, 0.7, 100, 100, 3, RV_RSTAR, indexId);
 
 	DB* db = NULL;	
