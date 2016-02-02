@@ -19,21 +19,24 @@ public:
 	/**************************** CTOR ****************************/
 
 	MGArchive()
-		: m_isLoading(false)
+		: m_s("", ios_base::in | ios_base::out | ios_base::binary)
+		, m_isLoading(false)
 		, m_isSaving(true)
 	{
 	}
 
 	MGArchive(const char* data, unsigned int size)
-		: m_isLoading(true)
+		: m_s("", ios_base::in | ios_base::out | ios_base::binary)
+		, m_isLoading(true)
 		, m_isSaving(false)
 	{
-		m_s.seekp(0);
 		m_s.write(data, size);
+		m_s.seekg(0);
 	}
 
 	MGArchive(MGArchive& ar)
-		: m_isLoading(true)
+		: m_s("", ios_base::in | ios_base::out | ios_base::binary)
+		, m_isLoading(true)
 		, m_isSaving(false)
 	{
 		// TODO: Find non-intrusive method

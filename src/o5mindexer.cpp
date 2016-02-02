@@ -10,6 +10,7 @@
 #include <leveldb/db.h>
 #include <leveldb/write_batch.h>
 #include <leveldb/comparator.h>
+#include <leveldb/filter_policy.h>
 
 #include <spatialindex/SpatialIndex.h>
 #include <ZFXMath.h>
@@ -61,10 +62,11 @@ class Way
 public:
 	uint64_t id;
 	BBox bbox;
-	TPolygon2D<TFixed<int32_t, 7>> polygon;
+	TPolygon2D<int32_t> polygon;
 	vector<Tag> tags;
 };
 
+//#pragma optimize( "", off )
 
 MGArchive& operator<<(MGArchive& archive, BBox& bbox)
 {
@@ -123,7 +125,6 @@ MGArchive& operator<<(MGArchive& archive, Way& way)
 	return archive;
 }
 
-#pragma optimize( "", off )
 
 Slice IdToSlice(const uint64_t& id)
 {
@@ -183,6 +184,17 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 	{
 		nodeIds.push_back(nodeId);
 	}
+
+	char *key, *val;
+	while ((ret = o5mreader_iterateTags(reader, &key, &val)) == O5MREADER_ITERATE_RET_NEXT)
+	{
+		Tag tag;
+		tag.key = key;
+		tag.value = val;
+		way.tags.push_back(tag);
+	}
+
+	// TODO: push way to queue to let the worker threads compute the bounding box
 
 	way.polygon.SetNumVertices((int)nodeIds.size());
 
@@ -246,26 +258,15 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 	if (nodeIndex < nodeIds.size())
 	{
 		cout << "Broken Way! Nodes are missing! wayId: " << wayId << endl;
-		outputNodeTags = true;
+		for (size_t i = 0; i < way.tags.size(); i++)
+		{
+			cout << way.tags[i].key << " --- " << way.tags[i].value << endl;
+		}
 	}
 
 	delete iterator;
 
 	way.bbox = bb;
-
-	char *key, *val;
-	while ((ret = o5mreader_iterateTags(reader, &key, &val)) == O5MREADER_ITERATE_RET_NEXT) 
-	{
-		Tag tag;
-		tag.key = key;
-		tag.value = val;
-		way.tags.push_back(tag);
-
-		if (outputNodeTags)
-		{
-			cout << key << " --- " << wayId << endl;
-		}
-	}
 
 	MGArchive archive;
 	archive << way;
@@ -293,11 +294,24 @@ public:
 	{
 		uint64_t id = in.getIdentifier();
 		ways.push_back(id);
+
+		const bool doDataDeserialization = true;
+		if(doDataDeserialization)
+		{
+			uint32_t dataLen;
+			byte* data;
+			in.getData(dataLen, &data);
+
+			MGArchive archive((const char*)data, dataLen);
+			Way way;
+			archive << way;
+
+			delete data;
+		}
 	}
 	virtual void visitData(std::vector<const IData*>& v) 
 	{
-		//uint64_t id = v.getIdentifier();
-		ways.push_back(0);
+		cout << "Error: visitData (multi data) not implemented" << endl;
 	}
 };
 
@@ -310,8 +324,8 @@ void TestSpatialIndexSpeed(string& wayDBFilePath)
 
 	GetAllWays getAllWays;
 
-	double min[2]{ -180.0, -90.0 };
-	double max[2]{ 180.0, 90.0 };
+	double min[2]{ 4.7, 52.5 };
+	double max[2]{ 4.8, 53.6 };
 	Region queryAABB(min, max, 2);
 	tree->intersectsWithQuery(queryAABB, getAllWays);
 
@@ -334,11 +348,12 @@ int main()
 	char *role;
 
 
-	//string baseFile = "netherlands-latest.osm.o5m";
-	string baseFile = "antarctica-2016-01-06.osm.o5m";
+	string baseFile = "netherlands.osm.o5m";
+	//string baseFile = "antarctica-2016-01-06.osm.o5m";
 
-	string nodeDBFilePath = "../test/files/" + baseFile + ".nd-idx";
-	string wayDBFilePath = "../test/files/" + baseFile + ".way";
+	string root = "../test/files/";
+	string nodeDBFilePath = root + baseFile + ".nd-idx";
+	string wayDBFilePath = root + baseFile + ".way";
 
 	TestSpatialIndexSpeed(wayDBFilePath);
 	return 0;
@@ -353,6 +368,7 @@ int main()
 	options.comparator = new OSMIdComparator();
 	options.create_if_missing = true;
 	options.write_buffer_size = 100 << 20;
+	options.filter_policy = NewBloomFilterPolicy(32);
 	DB::Open(options, nodeDBFilePath, &db);
 
 	string srcFilePath = "../test/files/" + baseFile;
@@ -448,6 +464,7 @@ int main()
 
 	delete options.comparator;
 	delete db;
+	delete options.filter_policy;
 
 	delete tree;
 	delete diskfile;
