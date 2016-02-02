@@ -168,7 +168,8 @@ public:
 	CachedDiskStorageManager(const string& filePath)
 		: db(NULL)
 		, wasChanged(false)
-		, nextPage(1)
+		, nextPage(0)
+		, currentUseIndex(0)
 	{
 		options.comparator = new OSMIdComparator();
 		options.create_if_missing = true;
@@ -176,21 +177,27 @@ public:
 		options.filter_policy = NewBloomFilterPolicy(32);
 		DB::Open(options, filePath, &db);
 	}
+
 	virtual ~CachedDiskStorageManager() 
 	{
 		flush();
+
+		delete options.comparator;
+		delete db;
+		delete options.filter_policy;
 	}
 
 	virtual void flush() 
 	{
 		if (wasChanged)
 		{
+			FlushLRUCache(pageIndex.size());
+
 			db->CompactRange(NULL, NULL);
+			wasChanged = false;
 		}
 
-		delete options.comparator;
-		delete db;
-		delete options.filter_policy;
+		for (auto it = pageIndex.begin(); it != pageIndex.end(); ++it) delete (*it).second;
 	}
 
 	virtual void loadByteArray(const id_type page, uint32_t& len, byte** data) 
@@ -198,20 +205,32 @@ public:
 		*data = NULL;
 		len = 0;
 
-		// TODO: load from pageIndex
-
-		WriteOptions wo;
-		db->Write(wo, &writeBatch);
-		writeBatch.Clear();
-
-		ReadOptions ro;
-		string result;
-		if (db->Get(ro, IdToSlice(page), &result).ok())
+		std::map<id_type, Entry*>::iterator it = pageIndex.find(page);
+		if (it == pageIndex.end())
 		{
-			len = (uint32_t)result.size();
-			*data = new byte[len];
-			memcpy(*data, result.data(), len);
+			ReadOptions ro;
+			string result;
+			if (db->Get(ro, IdToSlice(page), &result).ok())
+			{
+				len = (uint32_t)result.size();
+				*data = new byte[len];
+				memcpy(*data, result.data(), len);
+				AddEntry(page, len, (const byte*)result.data());
+			}
+			else
+			{
+				throw InvalidPageException(page);
+			}
 		}
+		else
+		{
+			it->second->useIndex = currentUseIndex;
+			len = it->second->length;
+			*data = new byte[len];
+			memcpy(*data, it->second->data, len);
+		}
+
+		currentUseIndex++;
 	}
 
 	virtual void storeByteArray(id_type& page, const uint32_t len, const byte* const data) 
@@ -222,29 +241,105 @@ public:
 		{
 			page = nextPage;
 			nextPage++;
+
+			AddEntry(page, len, data);
+		}
+		else
+		{
+			std::map<id_type, Entry*>::iterator it = pageIndex.find(page);
+			if (it == pageIndex.end())
+			{
+				AddEntry(page, len, data);
+				it = pageIndex.find(page);
+			}
+
+			if (len > it->second->length)
+			{
+				delete[] it->second->data;
+				it->second->data = new byte[len];
+			}
+			it->second->length = len;
+			memcpy(it->second->data, data, len);
+			it->second->useIndex = currentUseIndex;
 		}
 
-		// TODO: store to pageIndex
-
-		writeBatch.Put(IdToSlice(page), Slice((const char*)data, len));
+		currentUseIndex++;
 	}
 
 	virtual void deleteByteArray(const id_type page)
 	{
+		map<id_type, Entry*>::iterator it = pageIndex.find(page);
+		if (it == pageIndex.end()) throw InvalidPageException(page);
+
+		delete it->second;
+		pageIndex.erase(it);
+
 		wasChanged = true;
-
-		// TODO: delete from pageIndex
-
 		writeBatch.Delete(IdToSlice(page));
 	}
 
 private:
+
+	void AddEntry(const id_type& page, const uint32_t len, const byte* const data)
+	{
+		Entry* e = new Entry();
+		e->length = len;
+		e->data = new byte[len];
+		e->useIndex = currentUseIndex;
+		memcpy(e->data, data, len);
+		pageIndex.insert(std::pair<id_type, Entry*>(page, e));
+
+		if (pageIndex.size() > 10000)
+		{
+			FlushLRUCache(pageIndex.size() / 2);
+		}
+	}
+
+	void FlushLRUCache(const size_t numEntriesToFlush)
+	{
+		if(pageIndex.size() > 0)
+		{
+			vector<uint64_t> useIndices;
+			useIndices.reserve(pageIndex.size());
+			for (auto it = pageIndex.begin(); it != pageIndex.end(); ++it)
+			{
+				useIndices.push_back(it->second->useIndex);
+			}
+			sort(useIndices.begin(), useIndices.end());
+
+			uint64_t limitUseIndex = useIndices[numEntriesToFlush - 1];
+
+			for (auto it = pageIndex.begin(); it != pageIndex.end();)
+			{
+				if (it->second->useIndex <= limitUseIndex)
+				{
+					writeBatch.Put(IdToSlice(it->first), Slice((const char*)it->second->data, it->second->length));
+					delete it->second;
+					it = pageIndex.erase(it);
+				}
+				else
+				{
+					it++;
+				}
+			}
+		}
+
+		WriteOptions wo;
+		db->Write(wo, &writeBatch);
+		writeBatch.Clear();
+	}
+
 	class Entry
 	{
 	public:
 		uint32_t length;
 		byte* data;
-		uint64_t fileOffset;
+		uint64_t useIndex;
+
+		~Entry()
+		{
+			delete[] data;
+		}
 	};
 
 	DB* db;
@@ -253,7 +348,8 @@ private:
 	WriteBatch writeBatch;
 
 	id_type nextPage;
-	std::map<id_type, Entry> pageIndex;
+	uint64_t currentUseIndex;
+	std::map<id_type, Entry*> pageIndex;
 };
 
 void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& wayId)
@@ -393,8 +489,9 @@ public:
 	virtual void visitData(const IData& in) 
 	{
 		uint64_t id = in.getIdentifier();
+		ways.push_back(id);
 
-		const bool doDataDeserialization = true;
+		const bool doDataDeserialization = false;
 		if(doDataDeserialization)
 		{
 			uint32_t dataLen;
@@ -407,7 +504,7 @@ public:
 
 			for (size_t i = 0; i < way.tags.size(); i++)
 			{
-				if (way.tags[i].key == "area")
+				//if (way.tags[i].key == "area")
 				{
 					ways.push_back(id);
 					break;
@@ -425,15 +522,17 @@ public:
 
 void TestSpatialIndexSpeed(string& wayDBFilePath)
 {
-	IStorageManager* diskfile = StorageManager::loadDiskStorageManager(wayDBFilePath);
+	IStorageManager* diskfile = new CachedDiskStorageManager(wayDBFilePath);
 	ISpatialIndex* tree = loadRTree(*diskfile, 1);
 
 	high_resolution_clock::time_point t1 = high_resolution_clock::now();
 
 	GetAllWays getAllWays;
 
-	double min[3]{ 4.0, 52.0, 0.002 };
-	double max[3]{ 5.0, 53.0, 500.0 };
+	//double min[3]{ 4.0, 52.0, 0.002 };
+	//double max[3]{ 5.0, 53.0, 500.0 };
+	double min[3]{ -180.0, -90.0, 0.0 };
+	double max[3]{ 180.0, 90.0, 500.0 };
 	Region queryAABB(min, max, 3);
 	tree->intersectsWithQuery(queryAABB, getAllWays);
 
