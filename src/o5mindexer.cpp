@@ -250,7 +250,6 @@ public:
 			if (it == pageIndex.end())
 			{
 				AddEntry(page, len, data);
-				it = pageIndex.find(page);
 			}
 			else
 			{
@@ -470,7 +469,7 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 	O5MCoord sizeX = bb.maxX - bb.minX;
 	O5MCoord sizeY = bb.maxY - bb.minY;
 	O5MCoord sizeMin = min(sizeX, sizeY);
-	O5MCoord sizeMax = min(sizeX, sizeY);
+	O5MCoord sizeMax = max(sizeX, sizeY);
 
 	double min[3]{ bb.minX * 0.0000001, bb.minY * 0.0000001, sizeMin * 0.0000001 };
 	double max[3]{ bb.maxX * 0.0000001, bb.maxY * 0.0000001, sizeMax * 0.0000001 };
