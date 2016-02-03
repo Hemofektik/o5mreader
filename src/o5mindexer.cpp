@@ -174,7 +174,7 @@ class CachedDiskStorageManager : public SpatialIndex::IStorageManager
 public:
 	CachedDiskStorageManager(const string& filePath)
 		: db(NULL)
-		, wasChanged(false)
+		, isDirty(false)
 		, nextPage(0)
 		, currentUseIndex(0)
 	{
@@ -196,15 +196,13 @@ public:
 
 	virtual void flush() 
 	{
-		if (wasChanged)
+		FlushLRUCache(pageIndex.size());
+
+		if (isDirty)
 		{
-			FlushLRUCache(pageIndex.size());
-
 			db->CompactRange(NULL, NULL);
-			wasChanged = false;
+			isDirty = false;
 		}
-
-		for (auto it = pageIndex.begin(); it != pageIndex.end(); ++it) delete (*it).second;
 	}
 
 	virtual void loadByteArray(const id_type page, uint32_t& len, byte** data) 
@@ -222,7 +220,7 @@ public:
 				len = (uint32_t)result.size();
 				*data = new byte[len];
 				memcpy(*data, result.data(), len);
-				AddEntry(page, len, (const byte*)result.data());
+				AddEntry(page, len, (const byte*)result.data(), false);
 			}
 			else
 			{
@@ -242,21 +240,21 @@ public:
 
 	virtual void storeByteArray(id_type& page, const uint32_t len, const byte* const data) 
 	{
-		wasChanged = true;
+		isDirty = true;
 
 		if (page == StorageManager::NewPage)
 		{
 			page = nextPage;
 			nextPage++;
 
-			AddEntry(page, len, data);
+			AddEntry(page, len, data, true);
 		}
 		else
 		{
 			std::map<id_type, Entry*>::iterator it = pageIndex.find(page);
 			if (it == pageIndex.end())
 			{
-				AddEntry(page, len, data);
+				AddEntry(page, len, data, true);
 			}
 			else
 			{
@@ -268,6 +266,7 @@ public:
 				it->second->length = len;
 				memcpy(it->second->data, data, len);
 				it->second->useIndex = currentUseIndex;
+				it->second->isDirty = true;
 			}
 		}
 
@@ -282,18 +281,19 @@ public:
 		delete it->second;
 		pageIndex.erase(it);
 
-		wasChanged = true;
+		isDirty = true;
 		writeBatch.Delete(IdToSlice(page));
 	}
 
 private:
 
-	void AddEntry(const id_type& page, const uint32_t len, const byte* const data)
+	void AddEntry(const id_type& page, const uint32_t len, const byte* const data, bool isDirty)
 	{
 		Entry* e = new Entry();
 		e->length = len;
 		e->data = new byte[len];
 		e->useIndex = currentUseIndex;
+		e->isDirty = isDirty;
 		memcpy(e->data, data, len);
 		pageIndex.insert(std::pair<id_type, Entry*>(page, e));
 
@@ -321,7 +321,10 @@ private:
 			{
 				if (it->second->useIndex <= limitUseIndex)
 				{
-					writeBatch.Put(IdToSlice(it->first), Slice((const char*)it->second->data, it->second->length));
+					if (it->second->isDirty)
+					{
+						writeBatch.Put(IdToSlice(it->first), Slice((const char*)it->second->data, it->second->length));
+					}
 					delete it->second;
 					it = pageIndex.erase(it);
 				}
@@ -332,9 +335,12 @@ private:
 			}
 		}
 
-		WriteOptions wo;
-		db->Write(wo, &writeBatch);
-		writeBatch.Clear();
+		if(isDirty)
+		{
+			WriteOptions wo;
+			db->Write(wo, &writeBatch);
+			writeBatch.Clear();
+		}
 	}
 
 	class Entry
@@ -343,6 +349,7 @@ private:
 		uint32_t length;
 		byte* data;
 		uint64_t useIndex;
+		bool isDirty;
 
 		~Entry()
 		{
@@ -352,7 +359,7 @@ private:
 
 	DB* db;
 	Options options;
-	bool wasChanged;
+	bool isDirty;
 	WriteBatch writeBatch;
 
 	id_type nextPage;
@@ -486,10 +493,16 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 	delete[] serializedWay;
 }
 
-class GetAllWays : public IVisitor
+class GetAllWaysWithKey : public IVisitor
 {
 public:
 	vector<uint64_t> ways;
+	string key;
+
+	GetAllWaysWithKey(const string& key)
+		: key(key)
+	{
+	}
 
 	virtual void visitNode(const INode& in) 
 	{
@@ -497,9 +510,8 @@ public:
 	virtual void visitData(const IData& in) 
 	{
 		uint64_t id = in.getIdentifier();
-		ways.push_back(id);
 
-		const bool doDataDeserialization = false;
+		const bool doDataDeserialization = true;
 		if(doDataDeserialization)
 		{
 			uint32_t dataLen;
@@ -512,7 +524,7 @@ public:
 
 			for (size_t i = 0; i < way.tags.size(); i++)
 			{
-				//if (way.tags[i].key == "area")
+				if (way.tags[i].key == key)
 				{
 					ways.push_back(id);
 					break;
@@ -535,12 +547,12 @@ void TestSpatialIndexSpeed(string& wayDBFilePath)
 
 	high_resolution_clock::time_point t1 = high_resolution_clock::now();
 
-	GetAllWays getAllWays;
+	GetAllWaysWithKey getAllWays("highway");
 
-	//double min[3]{ 4.0, 52.0, 0.002 };
-	//double max[3]{ 5.0, 53.0, 500.0 };
-	double min[3]{ -180.0, -90.0, 0.0 };
-	double max[3]{ 180.0, 90.0, 500.0 };
+	double min[3]{ 4.0, 52.0, 0.004 };
+	double max[3]{ 5.0, 53.0, 500.0 };
+	//double min[3]{ -180.0, -90.0, 0.0 };
+	//double max[3]{ 180.0, 90.0, 500.0 };
 	Region queryAABB(min, max, 3);
 	tree->intersectsWithQuery(queryAABB, getAllWays);
 
@@ -569,8 +581,12 @@ int main()
 	string nodeDBFilePath = root + baseFile + ".nd-idx";
 	string wayDBFilePath = root + baseFile + ".way";
 
-	//TestSpatialIndexSpeed(wayDBFilePath);
-	//return 0;
+	const bool PerformSpeedTest = true;
+	if(PerformSpeedTest)
+	{
+		TestSpatialIndexSpeed(wayDBFilePath);
+		return 0;
+	}
 
 	SpatialIndex::id_type indexId = 0;
 	IStorageManager* diskfile = new CachedDiskStorageManager(wayDBFilePath);
