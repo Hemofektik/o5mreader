@@ -160,10 +160,17 @@ public:
 	virtual void FindShortSuccessor(std::string* key) const {};
 };
 
-
-
+// CachedDiskStorageManager vs. DiskStorageManager
+// advantages:
+//  - reduces disk accesses to a minimum
+//  - reduces disk usage by about 40%
+//  - keeping track of index is not memory bound (index is only kept partially in memory)
+// disadvantages
+//  - leveldb dependency
 class CachedDiskStorageManager : public SpatialIndex::IStorageManager
 {
+	const int MaxNumPagesHeldInMemory = 10000;
+
 public:
 	CachedDiskStorageManager(const string& filePath)
 		: db(NULL)
@@ -290,7 +297,7 @@ private:
 		memcpy(e->data, data, len);
 		pageIndex.insert(std::pair<id_type, Entry*>(page, e));
 
-		if (pageIndex.size() > 10000)
+		if (pageIndex.size() > MaxNumPagesHeldInMemory)
 		{
 			FlushLRUCache(pageIndex.size() / 2);
 		}
