@@ -42,7 +42,7 @@ struct NodeValue
 static int numDBReadNodes = 0;
 static int numDBReadNodesPreviously = 0;
 static high_resolution_clock::time_point readNodeFromDB_T1;
-
+static double avgNumNodesPerWay = 0.0;
 
 struct BBox
 {
@@ -488,7 +488,9 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 	double min[3]{ bb.minX * 0.0000001, bb.minY * 0.0000001, sizeMin * 0.0000001 };
 	double max[3]{ bb.maxX * 0.0000001, bb.maxY * 0.0000001, sizeMax * 0.0000001 };
 	Region siBB(min, max, 3);
-	tree->insertData((uint32_t)waySize, (const byte*)serializedWay, siBB, wayId);
+	//tree->insertData((uint32_t)waySize, (const byte*)serializedWay, siBB, wayId);
+
+	avgNumNodesPerWay = avgNumNodesPerWay * 0.9 + nodeIds.size() * 0.1;
 
 	delete[] serializedWay;
 }
@@ -581,7 +583,7 @@ int main()
 	string nodeDBFilePath = root + baseFile + ".nd-idx";
 	string wayDBFilePath = root + baseFile + ".way";
 
-	const bool PerformSpeedTest = true;
+	const bool PerformSpeedTest = false;
 	if(PerformSpeedTest)
 	{
 		TestSpatialIndexSpeed(wayDBFilePath);
@@ -615,6 +617,7 @@ int main()
 	uint64_t numDataSetsRead = 0;
 	while ((ret = o5mreader_iterateDataSet(reader, &ds)) == O5MREADER_ITERATE_RET_NEXT) 
 	{
+		bool readingNodes = true;
 		numDataSetsRead++;
 
 		switch (ds.type) 
@@ -647,6 +650,7 @@ int main()
 				}
 
 				ReadWay(reader, db, tree, ds.id);
+				readingNodes = false;
 				break;
 			case O5MREADER_DS_REL:
 				// Could do something with ds.id
@@ -658,22 +662,25 @@ int main()
 				while ((ret2 = o5mreader_iterateTags(reader, &key, &val)) == O5MREADER_ITERATE_RET_NEXT) {
 					// Could do something with tag key and val
 				}
+				readingNodes = false;
 				break;
 		}
 
 		int numNodesReadIntermediate = numDBReadNodes - numDBReadNodesPreviously;
-		if (numNodesReadIntermediate > 100000)
+		/*if (numNodesReadIntermediate > 100000)
 		{
 			high_resolution_clock::time_point readNodeFromDB_T2 = high_resolution_clock::now();
 			duration<double> time_span = duration_cast<duration<double>>(readNodeFromDB_T2 - readNodeFromDB_T1);
 			
-			cout << "Num Nodes read per second: " << (int)(numNodesReadIntermediate / time_span.count()) << "                         \r";
+			int nodesPerSecond = (int)(numNodesReadIntermediate / time_span.count());
+			cout << "Nodes/s: " << nodesPerSecond << " ("<< (int)avgNumNodesPerWay <<" nodes per way ("<< (int)(nodesPerSecond / avgNumNodesPerWay) << " ways/s)\r";
 
 			numDBReadNodesPreviously = numDBReadNodes;
 			readNodeFromDB_T1 = readNodeFromDB_T2;
-		}
+		}*/
 
-		if ((numDataSetsRead & 0x7FFFF) == 0)
+		int outputInterval = readingNodes ? 0x7FFFF : 0x7FFF;
+		if ((numDataSetsRead & outputInterval) == 0)
 		{
 			if(writeDB)
 			{
@@ -685,7 +692,8 @@ int main()
 			high_resolution_clock::time_point t2 = high_resolution_clock::now();
 			duration<double> time_span = duration_cast<duration<double>>(t2 - t1);
 
-			cout << "Num Datasets read per second: " << (int)(numDataSetsReadIntermediate / time_span.count()) << "                               \r";
+			string unit = readingNodes ? "nodes/second: " : "ways/second: ";
+			cout << unit << (int)(numDataSetsReadIntermediate / time_span.count()) << "                               \r";
 
 			numDataSetsReadPreviously = numDataSetsRead;
 			t1 = t2;
