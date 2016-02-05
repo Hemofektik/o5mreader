@@ -18,6 +18,7 @@
 
 #include "MGArchive.h"
 #include "o5mindexer.h"
+#include "vector_tile.pb.h"
 
 using namespace std;
 using namespace std::chrono;
@@ -26,7 +27,9 @@ using namespace SpatialIndex;
 using namespace SpatialIndex::RTree;
 using namespace ZFXMath;
 
-
+const int SEG_MOVETO = 1;
+const int SEG_LINETO = 2;
+const int SEG_CLOSE = 7;
 
 typedef int32_t O5MCoord;
 
@@ -565,9 +568,321 @@ void TestSpatialIndexSpeed(string& wayDBFilePath)
 	cout << "Num Query took seconds: " << time_span.count() << "                               " << endl;
 }
 
+class Polygon
+{
+
+public:
+	uint64_t id;
+	TPolygon2D<double>* polygons;
+	int numPolygons;
+	//BoundingBox<double> aabb;
+
+	Polygon(uint64_t id, TPolygon2D<double>* exterior)
+		: id(id)
+		, polygons(NULL)
+		, numPolygons(0)
+		//	, aabb(0, 0, 0, 0)
+	{
+		//auto poly = (OGRPolygon*)src->GetGeometryRef();
+
+		// get AABB
+		/*{
+			OGREnvelope env;
+			poly->getEnvelope(&env);
+
+			aabb.left = env.MinX;
+			aabb.top = env.MinY;
+			aabb.width = env.MaxX - env.MinX;
+			aabb.height = env.MaxY - env.MinY;
+		}*/
+
+		// create outer perimeter
+		/*{
+			numPolygons = poly->getNumInteriorRings() + 1;
+			polygons = new TPolygon2D<double>[numPolygons];
+
+			auto ring = poly->getExteriorRing();
+			polygons[0].SetNumVertices(ring->getNumPoints());
+			auto vertices = polygons[0].GetVertices();
+			ring->getPoints(&vertices[0].x, sizeof(TVector2D<double>), &vertices[0].y, sizeof(TVector2D<double>));
+			polygons[0].CloseRing();
+
+			double area = polygons[0].ComputeArea();
+			assert(area >= 0.0);
+		}
+
+		// create inner holes
+		{
+			for (int p = 0; p < poly->getNumInteriorRings(); p++)
+			{
+				auto ring = poly->getInteriorRing(p);
+				polygons[p + 1].SetNumVertices(ring->getNumPoints());
+				auto vertices = polygons[p + 1].GetVertices();
+				ring->getPoints(&vertices[0].x, sizeof(TVector2D<double>), &vertices[0].y, sizeof(TVector2D<double>));
+				polygons[p + 1].CloseRing();
+
+				double area = polygons[p + 1].ComputeArea();
+				assert(area <= 0.0);
+			}
+		}*/
+	}
+
+	/*double ComputeSqrDistanceToBoundingBox(double x, double y) const
+	{
+		const double clampedX = Min(Max(x, aabb.left), aabb.left + aabb.width);
+		const double clampedY = Min(Max(y, aabb.top), aabb.top + aabb.height);
+
+		const double deltaX = clampedX - x;
+		const double deltaY = clampedY - y;
+
+		return deltaX * deltaX + deltaY * deltaY;
+	}*/
+
+	double ComputeSignedSquareDistance(double x, double y) const
+	{
+		bool pointIsRightOfEdge = false;
+		TVector2D<double> point(x, y);
+		double sqrDistance = polygons[0].ComputeSqrDistance(point, pointIsRightOfEdge);
+
+		for (int p = 1; p < numPolygons; p++)
+		{
+			bool pointIsRightOfInnerEdge = false;
+			double innerSqrDistance = polygons[p].ComputeSqrDistance(point, pointIsRightOfInnerEdge);
+			if (innerSqrDistance < sqrDistance)
+			{
+				sqrDistance = innerSqrDistance;
+				pointIsRightOfEdge = pointIsRightOfInnerEdge;
+			}
+		}
+
+		return pointIsRightOfEdge ? -sqrDistance : sqrDistance;
+	}
+};
+
+
+
+void OutputTile(bool verbose, vector_tile::Tile& tile)
+{
+	if (!verbose) {
+		std::cout << "layers: " << static_cast<std::size_t>(tile.layers_size()) << "\n";
+		for (std::size_t i = 0; i<static_cast<std::size_t>(tile.layers_size()); ++i)
+		{
+			vector_tile::Tile_Layer const& layer = tile.layers(i);
+			std::cout << layer.name() << ":\n";
+			std::cout << "  version: " << layer.version() << "\n";
+			std::cout << "  extent: " << layer.extent() << "\n";
+			std::cout << "  features: " << static_cast<std::size_t>(layer.features_size()) << "\n";
+			std::cout << "  keys: " << static_cast<std::size_t>(layer.keys_size()) << "\n";
+			std::cout << "  values: " << static_cast<std::size_t>(layer.values_size()) << "\n";
+			unsigned total_repeated = 0;
+			unsigned num_commands = 0;
+			unsigned num_move_to = 0;
+			unsigned num_line_to = 0;
+			unsigned num_close = 0;
+			unsigned num_empty = 0;
+			unsigned degenerate = 0;
+			vector<Polygon> polygons;
+			double cursorX = 0.0;
+			double cursorY = 0.0;
+			for (std::size_t j = 0; j<static_cast<std::size_t>(layer.features_size()); ++j)
+			{
+				vector_tile::Tile_Feature const & f = layer.features(j);
+				total_repeated += f.geometry_size();
+				int cmd = -1;
+				const int cmd_bits = 3;
+				unsigned length = 0;
+				unsigned g_length = 0;
+				vector<TPolygon2D<double>> polys;
+				TPolygon2D<double> poly;
+				for (int k = 0; k < f.geometry_size();)
+				{
+					if (!length) {
+						unsigned cmd_length = f.geometry(k++);
+						cmd = cmd_length & ((1 << cmd_bits) - 1);
+						length = cmd_length >> cmd_bits;
+						if (length <= 0) num_empty++;
+						num_commands++;
+					}
+					if (length > 0) {
+						length--;
+						if (cmd == SEG_MOVETO || cmd == SEG_LINETO)
+						{
+							uint32_t xZigZag = f.geometry(k++);
+							uint32_t yZigZag = f.geometry(k++);
+							g_length++;
+							if (cmd == SEG_MOVETO)
+							{
+								/*if (poly.GetNumVertices() > 2)
+								{
+									polys.push_back(move(poly));
+								}
+								else
+								{
+									poly.SetNumVertices(0);
+								}*/
+
+								num_move_to++;
+							}
+							else if (cmd == SEG_LINETO)
+							{
+								num_line_to++;
+							}
+						}
+						else if (cmd == (SEG_CLOSE & ((1 << cmd_bits) - 1)))
+						{
+							if (g_length <= 2) degenerate++;
+							g_length = 0;
+							num_close++;
+						}
+						else
+						{
+							std::stringstream s;
+							s << "Unknown command type: " << cmd;
+							throw std::runtime_error(s.str());
+						}
+					}
+				}
+			}
+			std::cout << "  geometry summary:\n";
+			std::cout << "    total: " << total_repeated << "\n";
+			std::cout << "    commands: " << num_commands << "\n";
+			std::cout << "    move_to: " << num_move_to << "\n";
+			std::cout << "    line_to: " << num_line_to << "\n";
+			std::cout << "    close: " << num_close << "\n";
+			std::cout << "    degenerate polygons: " << degenerate << "\n";
+			std::cout << "    empty geoms: " << num_empty << "\n";
+		}
+	}
+	else {
+		for (std::size_t j = 0; j < static_cast<std::size_t>(tile.layers_size()); ++j)
+		{
+			vector_tile::Tile_Layer const& layer = tile.layers(j);
+			std::cout << "layer: " << layer.name() << "\n";
+			std::cout << "  version: " << layer.version() << "\n";
+			std::cout << "  extent: " << layer.extent() << "\n";
+			std::cout << "  keys: ";
+			for (std::size_t k = 0; k < static_cast<std::size_t>(layer.keys_size()); ++k)
+			{
+				std::string const& key = layer.keys(k);
+				std::cout << key;
+				if (k < static_cast<std::size_t>(layer.keys_size()) - 1) {
+					std::cout << ",";
+				}
+			}
+			std::cout << "\n";
+			std::cout << "  values: ";
+			for (std::size_t l = 0; l < static_cast<std::size_t>(layer.values_size()); ++l)
+			{
+				vector_tile::Tile_Value const & value = layer.values(l);
+				if (value.has_string_value()) {
+					std::cout << value.string_value();
+				}
+				else if (value.has_int_value()) {
+					std::cout << value.int_value();
+				}
+				else if (value.has_double_value()) {
+					std::cout << value.double_value();
+				}
+				else if (value.has_float_value()) {
+					std::cout << value.float_value();
+				}
+				else if (value.has_bool_value()) {
+					std::cout << value.bool_value();
+				}
+				else if (value.has_sint_value()) {
+					std::cout << value.sint_value();
+				}
+				else if (value.has_uint_value()) {
+					std::cout << value.uint_value();
+				}
+				else {
+					std::cout << "null";
+				}
+				if (l < static_cast<std::size_t>(layer.values_size()) - 1) {
+					std::cout << ",";
+				}
+			}
+			std::cout << "\n";
+			for (std::size_t l = 0; l < static_cast<std::size_t>(layer.features_size()); ++l)
+			{
+				vector_tile::Tile_Feature const & feat = layer.features(l);
+				std::cout << "  feature: " << feat.id() << "\n";
+				std::cout << "    type: ";
+				unsigned feat_type = feat.type();
+				if (feat_type == 0) {
+					std::cout << "Unknown";
+				}
+				else if (feat_type == vector_tile::Tile_GeomType_POINT) {
+					std::cout << "Point";
+				}
+				else if (feat_type == vector_tile::Tile_GeomType_LINESTRING) {
+					std::cout << "LineString";
+				}
+				else if (feat_type == vector_tile::Tile_GeomType_POLYGON) {
+					std::cout << "Polygon";
+				}
+				std::cout << "\n";
+				std::cout << "    tags: ";
+				for (std::size_t m = 0; m < static_cast<std::size_t>(feat.tags_size()); ++m)
+				{
+					uint32_t tag = feat.tags(j);
+					std::cout << tag;
+					if (m < static_cast<std::size_t>(feat.tags_size()) - 1) {
+						std::cout << ",";
+					}
+				}
+				std::cout << "\n";
+				std::cout << "    geometries: ";
+				for (std::size_t m = 0; m < static_cast<std::size_t>(feat.geometry_size()); ++m)
+				{
+					uint32_t geom = feat.geometry(m);
+					std::cout << geom;
+					if (m < static_cast<std::size_t>(feat.geometry_size()) - 1) {
+						std::cout << ",";
+					}
+				}
+				std::cout << "\n";
+			}
+			std::cout << "\n";
+		}
+	}
+}
+
+void ReadVectorTileFromPBF()
+{
+	GOOGLE_PROTOBUF_VERIFY_VERSION;
+
+	vector_tile::Tile tile;
+
+	{
+		fstream input("../test/files/0-0-0.pbf", ios::in | ios::binary);
+		input.seekg(0, input.end);
+		uint64_t size = input.tellg();
+		input.seekg(0, input.beg);
+		char* buffer = new char[size];
+		input.read(buffer, size);
+
+		if (!tile.ParseFromArray(buffer, (int)size)) 
+		{
+			cerr << "Failed to parse tile." << endl;
+			return;
+		}
+
+		OutputTile(false, tile);
+
+		delete buffer;
+	}
+
+
+	google::protobuf::ShutdownProtobufLibrary();
+}
+
 #pragma optimize( "", on )
 int main() 
 {
+	ReadVectorTileFromPBF();
+	return 0;
+
 	O5mreader* reader;
 	O5mreaderDataset ds;
 	O5mreaderIterateRet ret, ret2;
@@ -607,7 +922,6 @@ int main()
 	FILE* f = fopen(srcFilePath.c_str(), "rb");
 	
 	o5mreader_open(&reader, f);
-
 	WriteBatch wb;
 	WriteOptions wo;
 

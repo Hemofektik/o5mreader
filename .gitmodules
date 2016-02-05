@@ -13,3 +13,6 @@
 [submodule "ZFXMath"]
 	path = ZFXMath
 	url = https://github.com/Hemofektik/ZFXMath.git
+[submodule "protobuf"]
+	path = protobuf
+	url = https://github.com/google/protobuf

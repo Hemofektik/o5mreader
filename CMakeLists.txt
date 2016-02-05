@@ -9,7 +9,7 @@ if(CMAKE_COMPILER_IS_GNUCXX)
 endif()
 
 
-file(GLOB_RECURSE O5MSOURCES src/*.h src/*.c src/*.cpp)
+file(GLOB_RECURSE O5MSOURCES src/*.h src/*.c src/*.cpp src/*.cc)
 
 foreach(f ${O5MSOURCES})
     # Get the path of the file relative to ${DIRECTORY},
@@ -36,16 +36,19 @@ include_directories(
 	${CMAKE_SOURCE_DIR}/snappy/
 	${CMAKE_SOURCE_DIR}/libspatialindex/include
 	${CMAKE_SOURCE_DIR}/ZFXMath/include
+	${CMAKE_SOURCE_DIR}/protobuf/src
 )
 
 add_subdirectory(snappy)
 add_subdirectory(leveldb)
 add_subdirectory(libspatialindex)
+add_subdirectory(protobuf/cmake)
 
 link_libraries (	
 	leveldb
 	snappy
 	spatialindex-64
+	libprotobuf-lite
 )
 
 
