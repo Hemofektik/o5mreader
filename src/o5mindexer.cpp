@@ -570,73 +570,61 @@ void TestSpatialIndexSpeed(string& wayDBFilePath)
 
 class Polygon
 {
-
 public:
 	uint64_t id;
 	TPolygon2D<double>* polygons;
 	int numPolygons;
-	//BoundingBox<double> aabb;
 
-	Polygon(uint64_t id, TPolygon2D<double>* exterior)
+	Polygon(const uint64_t id, const double scale, const TPolygon2D<int32_t>& exterior, 
+			const TPolygon2D<int32_t>* interior = NULL, 
+			const uint32_t numInteriors = 0)
 		: id(id)
-		, polygons(NULL)
-		, numPolygons(0)
-		//	, aabb(0, 0, 0, 0)
+		, polygons(new TPolygon2D<double>[1 + numInteriors])
+		, numPolygons(1 + numInteriors)
 	{
-		//auto poly = (OGRPolygon*)src->GetGeometryRef();
-
-		// get AABB
-		/*{
-			OGREnvelope env;
-			poly->getEnvelope(&env);
-
-			aabb.left = env.MinX;
-			aabb.top = env.MinY;
-			aabb.width = env.MaxX - env.MinX;
-			aabb.height = env.MaxY - env.MinY;
-		}*/
-
-		// create outer perimeter
-		/*{
-			numPolygons = poly->getNumInteriorRings() + 1;
-			polygons = new TPolygon2D<double>[numPolygons];
-
-			auto ring = poly->getExteriorRing();
-			polygons[0].SetNumVertices(ring->getNumPoints());
-			auto vertices = polygons[0].GetVertices();
-			ring->getPoints(&vertices[0].x, sizeof(TVector2D<double>), &vertices[0].y, sizeof(TVector2D<double>));
+		// copy outer perimeter
+		{
+			polygons[0] = exterior.Clone<double>(scale);
 			polygons[0].CloseRing();
 
 			double area = polygons[0].ComputeArea();
-			assert(area >= 0.0);
+			assert(area <= 0.0);
 		}
 
 		// create inner holes
 		{
-			for (int p = 0; p < poly->getNumInteriorRings(); p++)
+			for (uint32_t p = 0; p < numInteriors; p++)
 			{
-				auto ring = poly->getInteriorRing(p);
-				polygons[p + 1].SetNumVertices(ring->getNumPoints());
-				auto vertices = polygons[p + 1].GetVertices();
-				ring->getPoints(&vertices[0].x, sizeof(TVector2D<double>), &vertices[0].y, sizeof(TVector2D<double>));
+				polygons[p + 1] = interior[p].Clone<double>(scale);
 				polygons[p + 1].CloseRing();
 
 				double area = polygons[p + 1].ComputeArea();
-				assert(area <= 0.0);
+				assert(area >= 0.0);
 			}
-		}*/
+		}
 	}
 
-	/*double ComputeSqrDistanceToBoundingBox(double x, double y) const
+	Polygon(Polygon&& polygon)
+		: id(polygon.id)
+		, polygons(polygon.polygons)
+		, numPolygons(polygon.numPolygons)
 	{
-		const double clampedX = Min(Max(x, aabb.left), aabb.left + aabb.width);
-		const double clampedY = Min(Max(y, aabb.top), aabb.top + aabb.height);
+		polygon.polygons = NULL;
+	} // copy constructor is implicitly forbidden due to user-defined move constructor (use Clone() instead)
 
-		const double deltaX = clampedX - x;
-		const double deltaY = clampedY - y;
+	Polygon& operator= (Polygon&& polygon)
+	{
+		this->id = polygon.id;
+		this->polygons = polygon.polygons;
+		this->numPolygons = polygon.numPolygons;
+		polygon.polygons = NULL;
+		return *this;
+	} // copy assignment is implicitly forbidden due to user-defined move assignment (use Clone() instead)
 
-		return deltaX * deltaX + deltaY * deltaY;
-	}*/
+	~Polygon()
+	{
+		delete[] polygons;
+	}
 
 	double ComputeSignedSquareDistance(double x, double y) const
 	{
@@ -659,7 +647,10 @@ public:
 	}
 };
 
-
+int32_t ZigZagUint32ToInt32(uint32_t zigzag)
+{
+	return (int32_t)((zigzag & 1) ? -(int64_t)(zigzag >> 1) - 1 : (int64_t)(zigzag >> 1));
+}
 
 void OutputTile(bool verbose, vector_tile::Tile& tile)
 {
@@ -668,6 +659,8 @@ void OutputTile(bool verbose, vector_tile::Tile& tile)
 		for (std::size_t i = 0; i<static_cast<std::size_t>(tile.layers_size()); ++i)
 		{
 			vector_tile::Tile_Layer const& layer = tile.layers(i);
+			const double tileScale = 1.0 / layer.extent();
+
 			std::cout << layer.name() << ":\n";
 			std::cout << "  version: " << layer.version() << "\n";
 			std::cout << "  extent: " << layer.extent() << "\n";
@@ -681,19 +674,22 @@ void OutputTile(bool verbose, vector_tile::Tile& tile)
 			unsigned num_close = 0;
 			unsigned num_empty = 0;
 			unsigned degenerate = 0;
+
 			vector<Polygon> polygons;
-			double cursorX = 0.0;
-			double cursorY = 0.0;
+			vector<TPolygon2D<double>> lineStrings;
+			uint64_t lastFeatureId = 0;
 			for (std::size_t j = 0; j<static_cast<std::size_t>(layer.features_size()); ++j)
 			{
+				int32_t cursorX = 0;
+				int32_t cursorY = 0;
 				vector_tile::Tile_Feature const & f = layer.features(j);
 				total_repeated += f.geometry_size();
 				int cmd = -1;
 				const int cmd_bits = 3;
 				unsigned length = 0;
 				unsigned g_length = 0;
-				vector<TPolygon2D<double>> polys;
-				TPolygon2D<double> poly;
+				vector<TPolygon2D<int32_t>> polys;
+				TPolygon2D<int32_t> poly;
 				for (int k = 0; k < f.geometry_size();)
 				{
 					if (!length) {
@@ -709,17 +705,20 @@ void OutputTile(bool verbose, vector_tile::Tile& tile)
 						{
 							uint32_t xZigZag = f.geometry(k++);
 							uint32_t yZigZag = f.geometry(k++);
+							int32_t xRel = ZigZagUint32ToInt32(xZigZag);
+							int32_t yRel = ZigZagUint32ToInt32(yZigZag);
+							cursorX += xRel;
+							cursorY += yRel;
+
 							g_length++;
 							if (cmd == SEG_MOVETO)
 							{
-								/*if (poly.GetNumVertices() > 2)
+								if (poly.GetNumVertices() > 0)
 								{
 									polys.push_back(move(poly));
+									poly = TPolygon2D<int32_t>();
+									poly.ReserveNumVertices(10);
 								}
-								else
-								{
-									poly.SetNumVertices(0);
-								}*/
 
 								num_move_to++;
 							}
@@ -727,12 +726,18 @@ void OutputTile(bool verbose, vector_tile::Tile& tile)
 							{
 								num_line_to++;
 							}
+
+							poly.AddVertex(TVector2D<int32_t>(cursorX, cursorY));
 						}
 						else if (cmd == (SEG_CLOSE & ((1 << cmd_bits) - 1)))
 						{
 							if (g_length <= 2) degenerate++;
 							g_length = 0;
 							num_close++;
+
+							polys.push_back(move(poly));
+							poly = TPolygon2D<int32_t>();
+							poly.ReserveNumVertices(10);
 						}
 						else
 						{
@@ -740,6 +745,42 @@ void OutputTile(bool verbose, vector_tile::Tile& tile)
 							s << "Unknown command type: " << cmd;
 							throw std::runtime_error(s.str());
 						}
+					}
+				}
+
+				if (f.type() == vector_tile::Tile_GeomType_POLYGON)
+				{
+					size_t polyStartIndex = 0;
+					for (size_t p = 0; p < polys.size(); p++)
+					{
+						int64_t polyArea = polys[p].ComputeArea<int64_t>();
+						if (p > polyStartIndex && polyArea < 0) // test for multipolygons including interior polys
+						{
+							auto& poly = polys[polyStartIndex];
+							const auto* nextPoly = &polys[polyStartIndex + 1];
+							Polygon polygon(f.id(), tileScale, poly,
+								(polyStartIndex + 1 < polys.size() ) ? nextPoly : NULL,
+								(uint32_t)(p - polyStartIndex - 1));
+							polygons.push_back(move(polygon));
+
+							polyStartIndex = p;
+						}
+					}
+					if (polyStartIndex < polys.size())
+					{
+						Polygon polygon(f.id(), tileScale, polys[polyStartIndex],
+							(polyStartIndex + 1 < polys.size()) ? &polys[polyStartIndex + 1] : NULL,
+							(uint32_t)(polys.size() - 1 - polyStartIndex));
+						polygons.push_back(move(polygon));
+					}
+				}
+				else if (f.type() == vector_tile::Tile_GeomType_LINESTRING)
+				{
+					polys.push_back(move(poly));
+
+					for (const auto& p : polys)
+					{
+						lineStrings.push_back(move(p.Clone<double>(tileScale)));
 					}
 				}
 			}
@@ -751,6 +792,8 @@ void OutputTile(bool verbose, vector_tile::Tile& tile)
 			std::cout << "    close: " << num_close << "\n";
 			std::cout << "    degenerate polygons: " << degenerate << "\n";
 			std::cout << "    empty geoms: " << num_empty << "\n";
+			std::cout << "    NUM POLYGONS: " << polygons.size() << "\n";
+			std::cout << "    NUM LINE STRINGS: " << lineStrings.size() << "\n";
 		}
 	}
 	else {
