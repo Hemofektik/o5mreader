@@ -491,7 +491,7 @@ void ReadWay(O5mreader* reader, DB* db, ISpatialIndex* tree, const uint64_t& way
 	double min[3]{ bb.minX * 0.0000001, bb.minY * 0.0000001, sizeMin * 0.0000001 };
 	double max[3]{ bb.maxX * 0.0000001, bb.maxY * 0.0000001, sizeMax * 0.0000001 };
 	Region siBB(min, max, 3);
-	//tree->insertData((uint32_t)waySize, (const byte*)serializedWay, siBB, wayId);
+	tree->insertData((uint32_t)waySize, (const byte*)serializedWay, siBB, wayId);
 
 	avgNumNodesPerWay = avgNumNodesPerWay * 0.9 + nodeIds.size() * 0.1;
 

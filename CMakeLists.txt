@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 2.8)
 
 project (o5mindexer)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY  "${CMAKE_SOURCE_DIR}/bin")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
 
 if(CMAKE_COMPILER_IS_GNUCXX)
 	#set(CMAKE_BUILD_TYPE Debug)
@@ -15,7 +15,7 @@ foreach(f ${O5MSOURCES})
     # Get the path of the file relative to ${DIRECTORY},
     # then alter it (not compulsory)
     file(RELATIVE_PATH SRCGR ${CMAKE_CURRENT_SOURCE_DIR} ${f})
-    set(SRCGR "O5MSOURCES/${SRCGR}")
+    set(SRCGR "${SRCGR}")
 
     # Extract the folder, ie remove the filename part
     string(REGEX REPLACE "(.*)(/[^/]*)$" "\\1" SRCGR ${SRCGR})
@@ -39,16 +39,23 @@ include_directories(
 	${CMAKE_SOURCE_DIR}/protobuf/src
 )
 
-add_subdirectory(snappy)
-add_subdirectory(leveldb)
-add_subdirectory(libspatialindex)
-add_subdirectory(protobuf/cmake)
 
-link_libraries (	
-	leveldb
-	snappy
-	spatialindex-64
-	libprotobuf-lite
+add_subdirectory(protobuf/cmake EXCLUDE_FROM_ALL )
+add_subdirectory(leveldb EXCLUDE_FROM_ALL)
+add_subdirectory(snappy EXCLUDE_FROM_ALL)
+add_subdirectory(libspatialindex EXCLUDE_FROM_ALL)
+
+set  (THIRDPARTY
+      leveldb
+      snappy
+	  spatialindex-64
+	  libprotobuf-lite)
+
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+set_property(TARGET ${THIRDPARTY} PROPERTY FOLDER "3rdparty")
+
+link_libraries (
+	${THIRDPARTY}
 )
 
 
@@ -57,3 +64,9 @@ add_executable (
    ${O5MSOURCES}
 )
 
+if(CMAKE_CONFIGURATION_TYPES)
+	set(CMAKE_CONFIGURATION_TYPES Debug Release RelWithDebInfo)
+	set(CMAKE_CONFIGURATION_TYPES "${CMAKE_CONFIGURATION_TYPES}" CACHE STRING
+		"Reset the configurations to what we need"
+		FORCE)
+endif()
